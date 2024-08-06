@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>MTAS(Multi-Task Asyncio Server)——多用途的异步服务器</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>MTAS(Multi-Task Asyncio Server)</h1>
+    <h1>多用途的异步服务器</h1>
+    <p>当前是一个网络时代，要求万物互联，在开发时需要进行大量的网络通讯，如何方便、快速的实现网络通信是必须要解决的问题。</p>
+    <p>如果从底层实现通迅，那么是相当的麻烦，消耗大量的精力。</p>
+    <p>MTAS就是为专门解决上述难点而提出和实现的一个多用途通信服务器，具体来说MTAS具有以下特点：</p>
+    <ul>
+        <li>MTAS是一种异步机制的通信服务器，并且包含了三种协议</li>
+        <li>Python语言实现，只依赖Python标准库，不依赖于其他第三方库!</li>
+        <li>结构紧凑，整个服务器只有1个文件mtas.py</li>
+        <li>功能丰富，支持简单的http协议，支持WebSocket协议，支持MTAS自定义的Socket协议</li>
+        <li>对于HTTP支持标准的WSGI接品，提供了一个简单的WSGI框架，用于实现简单的http服务，也可接入WSGI的WEB框架，对于简单WEB可联合Bottle作为WSGI应用</li>
+        <li>WebSocket协议，支持文本和二进制的转输，并提供了发布者，定阅者，服务器和客户端4种通信机制</li>
+        <li>对于MTAS自定义的Socket协议，用法与WebSocket相似，支持文本和二进制的转输，并提供了发布者，定阅者，服务器和客户端4种通信机制</li>
+        <li>可用于建立丰富的WEB应用，或进行机器人控制，或智能家居，或物联网设备</li>
+        <li>并发数>500次/秒，可满足小型应用的服务需求</li>
+        <li>Demo页面中展展了MTAS在HTTP和WebSocket上的功能：<a href="/ws">进入测试页</a></li>
+    </ul>
+    <p>下方是一个可用鼠标绘制的Canvas画布，在绘画时将鼠标的坐标发送给服务器。</p>
+    <p>服务端的代码如下：</p>
+    <code>
+        @wsroute('/canvascmd',pattern='subscriber')
+        async def subscribertxt(env,data=None): 
+            rpc=Jsonrpc.parserequest(data)
+            print(rpc.request)
+    </code>
+</br>
+    <canvas id="myCanvas" width="500" height="500"></canvas>
+
+    <script src="/static/canvasdraw.js"></script>
+</body>
+
+</html>
