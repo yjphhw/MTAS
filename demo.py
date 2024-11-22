@@ -1,5 +1,5 @@
 #from bottle import route,app,static_file
-from mtas import run,wsroute,Jsonrpc,skroute,htroute,static_file
+from mtas import run,wsroute,Jsonrpc,skroute,htroute,static_file,servedir
 import asyncio 
 import numpy as np
 import cv2
@@ -126,38 +126,15 @@ async def rpcclient(env,data=None):
         return res,'text'
 
 
-#INDEXHTML=open('./static/index.html','r',encoding='utf-8').read()
-'''
-@route('/')
-def index(): 
-    #return 'hello world'
-    #return INDEXHTML
-    return static_file('index.html',root='./static')
-
-#用于测试上述websocket例子
-@route('/ws')
-def index(): 
-    return static_file('testwebsocket.html',root='./static')
-
-#使用
-@route('/json')
-def j():
-    return dict(a=3,b=4)
-
-#静态文件
-@route('/static/<path:path>')
-def sfile(path):
-    return static_file(path,root='./static')
-'''
 
 @htroute('/')
 def index(environ): 
-    return static_file('index.html',root='./static')
+    return static_file('index.html',root='./static/')
 
 #用于测试上述websocket例子
 @htroute('/ws')
 def index(environ): 
-    return static_file('testwebsocket.html',root='./static')
+    return static_file('testwebsocket.html',root='./static/')
 
 #字符串,列表
 @htroute('/sayhello')
@@ -189,6 +166,9 @@ def sfile(environ):
     path='/'.join(path) if isinstance(path,(tuple,list)) else path
     return static_file(path,root='./static/')
 
+#发布整个文件夹，会生成子目录文件列表
+servedir('/files', './')
+
 #querystring
 @htroute('/compute')
 def compute(environ):     #'/compute?a=1&b=4   #传入的都是字符串
@@ -199,17 +179,17 @@ def compute(environ):     #'/compute?a=1&b=4   #传入的都是字符串
 
 @htroute('/add/<a:int>/<b:int>')
 def add(environ):
-    arg=environ['args']
-    a=int(arg[0])
-    b=int(arg[1])
+    args=environ['args']
+    a=int(args[0])
+    b=int(args[1])
     return f'{a+b}'
 
 @htroute('/multi/<a>/<b>/<c>/...')
 def multi(environ):
     #http://127.0.0.1:8889/multi/3/4/5/6/6/1/2/3/  返回12960
-    arg=environ['args']
+    args=environ['args']
     res=1
-    for i in arg:
+    for i in args:
         res*=float(i)
     return f'{res}'
 if __name__=='__main__':

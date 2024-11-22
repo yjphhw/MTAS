@@ -7,6 +7,9 @@ import sys
 import os
 import ssl
 
+# 判断是否为micropython的标志位
+ISMICROPYTHON=True if sys.implementation.name=='micropython' else False
+
 SERVER_FULLNAME='Multi-Task Asyncio Server'
 SERVER_NAME='MTAS'
 VERSION='1.0'
@@ -15,7 +18,7 @@ SERVER_PORT=8888
 
 HTTP_METHODS=['GET','PUT','POST','HEAD']
 
-#WEBSOCKET边接相关的处理
+#WEBSOCKET连接相关的处理
 MAGIC_STR='258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 WEBSOCKET_RESPONSE='HTTP/1.1 101 Switching Protocols\r\n'+ \
            f'Server: {SERVER}\r\n' + \
@@ -68,7 +71,7 @@ class Jsonrpc:
         return Jsonrpc(req).error(-32600,'Invalid Request','The JSON sent is not a valid Request object.')
     
     def success(self,result):
-        # result能够被json化，是列表或字符串，或者字贼胆，
+        # result能够被json化，是列表或字符串，或者字典
         # 直接返回编码的二进制
         rsp={'jsonrpc':self.protocol,'id':self.id}
         rsp['result']=result
@@ -135,7 +138,7 @@ def skroute(url,method='publisher'):
 
 #MTAS-SOCKET连接处理器
 class MtassocketHandler:
-    METHODS=['PUBLISHER', 'SUBSCRIBER', 'SERVER', 'CLIENT']
+    METHODS=['PUBLISHER', 'SUBSCRIBER', 'SERVER', 'CLIENT', 'RAWPUB']  #RAWPUB用于发布纯文本或二进制消息，类似于中继
     FRAME_TYPE=['text','bin']
     def __init__(self, reader, writer, app):
         self.env={}
@@ -177,6 +180,11 @@ class MtassocketHandler:
                 await self.write(frame)
                 data=await self.readframe()
                 await callback(self.env,data)
+        if method=='RAWPUB':
+            while True:
+                res,tp=await callback(self.env)
+                if res:
+                    await self.write(res)
         raise Exception('mtassocket pattern error')
 
     def makeframe(self,data:bytes=b'{}',type='text'):    
@@ -397,29 +405,30 @@ class WSGIFileWrapper(object):
 
 class Httpapp:
     '''
-    仿照修改Bottle.py来实现自己简单的http的app
+    借签和修改自Bottle.py实现了一个简单的HTTP响应程序，只支持GET方法
+    未来不打算也不计划实现其他方法，其他方法可以通过WebSocket建立长连接来完成。
     简单实现了字符串，python字典，url的query参数和静态文件的传输
     '''
     BUFFER_SIZE=1024
     def __init__(self):
-        self.funcs={}
+        self.funcs={}       #记录url的path和响应函数的映射
         self.response=None
 
     def addfunc(self,url='/',callback=lambda x:x):
         #print(url)
         idx=url.find('/<')
-        if idx>-1:  #/jif/<path：path>     /jif/test.js
+        if idx>-1:  #/jif/<path>     /jif/test.js
             url=url[:idx]
         if url in self.funcs:
             raise Exception('url 冲突请重新定义')
-        parts=tuple(url.split('/')[1:])
+        parts=tuple(url.split('/'))
         self.funcs[parts]=callback
 
     def removefunc(self,url='/'):
         idx=url.find('<')
         if idx>-1:  #/jif/<path：path>     /jif/test.js
             url=url[:idx]
-        parts=tuple(url.split('/')[1:])
+        parts=tuple(url.split('/'))
         if parts in self.funcs:
             del self.funcs[parts]
             
@@ -427,17 +436,17 @@ class Httpapp:
         #函数匹配使用完整性优先，随后最长路径匹配法，不匹配的后部分为参数
         #例如 path='/get/c'     self.funcs里有{'/get' , '/get/a'} 那么匹配/get
         #例如 path='/get/a'   self.funcs里有{'/get/a/k','/get/a','get' } 那么就匹配/get/a
-        #path=environ.get('PATH_INFO','/')
-        parts=tuple(path.split('/')[1:])
-        if len(parts)==1:
-            return self.funcs.get(parts,None),None
-        for i in range(len(parts),0,-1):
+        #注意：路径path='/a'和'/a/' 是不同的，可以作为两个不同的路径，如果/a存在，/a/会退回到/a
+        #所有的退回都会到根，也就是不存在的路径都会退回到主页？这是一个问题
+        parts=tuple(path.split('/'))
+        for i in range(len(parts),1,-1):
             tmp=parts[:i]
             if tmp in self.funcs:
                 return self.funcs[tmp],parts[i:]
-        #没有找到
+            tmp=tmp[:i-1]+tuple([''])
+            if tmp in self.funcs:
+                return self.funcs[tmp],parts[i-1:]
         return None,None
-
     def route(self,url,method='GET'):
         """
             添加路由和回调函数的装饰器，只支持GET方法
@@ -471,10 +480,10 @@ class Httpapp:
         if isinstance(out, bytes):
             response['headerdic']['Content-Length'] =  f'{len(out)}'
             return [out]
-        if isinstance(out, dict) and 'body' in out:
+        if isinstance(out, dict) and 'body' in out:  #处理static file
             response['headerdic'].update(out['args'])
             return self._cast(out['body'],request_env,response)
-        if hasattr(out, 'read'):
+        if hasattr(out, 'read'):                    #处理文件
             if 'wsgi.file_wrapper' in request_env:
                 return request_env['wsgi.file_wrapper'](out)
             elif hasattr(out, 'close') or not hasattr(out, '__iter__'):
@@ -486,13 +495,13 @@ class Httpapp:
         response={'status_line':'200 OK','headerdic':{'Content-Length':'0','Content-Type':'text/html; charset=UTF-8'}} #默认初始化
         
         path=environ.get('PATH_INFO','/')
-        query=environ.get('QUERY_STRING',None)
+        query=environ.get('QUERY_STRING','')
 
         callback,args=self.getfunc(path)
 
         if callback==None: 
-            return self.error(environ,start_response)
-        print(path,callback,args)
+            return self.error(environ,start_response,URL_ERROR_HTML)
+        #print(path,callback,args)
         #解析url中的query参数
         if query:
             query_dic={}
@@ -514,7 +523,7 @@ class Httpapp:
             return self.wsgi(environ, start_response)
         except Exception as e :
             print(e)
-            return self.error(environ,start_response,'服务器内部错误!<br>') 
+            return self.error(environ,start_response,'服务器内部错误!<br>'+str(e)) 
 
     def error(self, environ, start_response,msg=None):
         #错误的http请求
@@ -525,7 +534,8 @@ class Httpapp:
         else:
             return [ msg.encode()]
 
-def static_file(filename, root):
+def static_file(filename='index.html', root='./'):
+    #filename and root 需要是有效的路径字符串，root需要用/结尾
     #https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types#textjavascript
     resp_dic={'args':{}}
     f=filename.lower()
@@ -562,14 +572,37 @@ def static_file(filename, root):
     else:
         resp_dic['args']['Content-Type'] = mimetype
     
-    root = os.path.join(os.path.abspath(root), '')
-    filename = os.path.join(root, filename.strip('/\\'))
-    resp_dic['args']['Content-Length'] = os.path.getsize(filename)
-
-    #stats = os.stat(filename)
-    #resp_dic['args']['Content-Length'] = stats.st_size
-    resp_dic['body'] =  open(filename, 'rb')
+    #下面4行是为了兼容micropython,Python中直接的读取文件长度的方法
+    fpath=root+filename
+    stats = os.stat(fpath)
+    resp_dic['args']['Content-Length'] = stats[6]
+    resp_dic['body'] =  open(fpath, 'rb')
     return resp_dic
+    
+
+def servedir(urlbase='/files',root='./'):
+    #将整个目录的文件以静态文件发布到http上,目前支持了层级目录
+    #但是对于路径中含有空格的目录和非英文字符的文件和目录（如中文，日文等）不支持，
+    #为了在micropython运行，未来也不打算支持空格和非英文字符的文件和目录
+    def generate_links(urlbase,path,fnames):
+        if (urlbase=='/'): urlbase=''
+        if path=='':
+            links=["<a href='{url}/{i}'>{i}</a>".format(url=urlbase,i=i) for i in fnames]
+        else:
+            links=["<a href='{url}/{path}/{i}'>{i}</a>".format(url=urlbase,i=i,path=path) for i in fnames]
+        return ['<br>'.join(links)]
+    def sfile(environ):
+        path=environ['args']
+        path='/'.join(path) if path else ''
+        fullpath=f'{root}{path}'
+        if os.stat(fullpath)[0]<20000: #文件夹为了将micropython和python统一
+            fnames=os.listdir(fullpath)
+            return generate_links(urlbase,path,fnames)
+        else:
+            return static_file(path,root=root)
+    global httpapp
+    httpapp.addfunc(urlbase,sfile)
+
 
 def htroute(url):     
     #httpapp注册接口，使用@htroute('/url')目前只支持GET
@@ -611,7 +644,7 @@ class HttpHandler:
         return self.write
     
     async def run(self,env):
-        #每个http请求都会生成一个该对象，不会污染self.env的值
+        #每个http请求都会生成一个HTTPHandler对象，不会污染self.env的值
         self.env.update(env)
         #用于处理更长数据的请求,如post,将请求的东西全部注入到self.env中
         #下面的两种方法，第一种在esp32的micropython中使用，第二种在计算机中应当分别使用
@@ -634,7 +667,7 @@ class HttpHandler:
         await self.writer.wait_closed()  #关闭连接
 
     def generateheaders(self,status="200 OK",response_headers=[('Content-Type','text/plain')]):  
-        #生成http的响应头
+        #生成HTTP的响应头
         pro=self.env['SERVER_PROTOCOL']
         headers=f'{pro} {status}\r\n'
         for tu in response_headers:
@@ -648,15 +681,19 @@ HTTP_UNSUPPORTED_RSP='{} 511 Network Authentication Required\r\n\r\n'
 async def client_dispatch(reader, writer):
     #请求分配器，判断请求类型http,websocket和mtassocket，根据类型分配执行器
     remoteip,remoteport = writer.get_extra_info('peername')     
-    print(f'链接来自于：{remoteip},{remoteport}')  #使用日志
-    #后期要注意超长的连接，一行一直不结束，对于websocket和http就是请求
-    data=await reader.readline()  
-    data=data.decode().rstrip() #解码为字符串
-    print('请求头:',data)
+    print(f'链接来自于：{remoteip}:{remoteport}')  #使用日志
     try: 
+        #后期要注意超长的连接，一行一直不结束，对于websocket和http就是请求
+        data=await reader.readline()  
+        data=data.decode().rstrip() #解码为字符串
+        print(f'请求头长度:{len(data)}字节,内容:{data}')
+    except Exception as e:  #是一个非法的链接，直接关闭返回
+        print(f'invalid connection error[0], {e}')
+        return 
+    try:
         method, path, protocal = data.split()  #example:GET / HTTP/1.1
         #按照wsgi的格式进行请求头的解析
-        request_env={}
+        request_env={'QUERY_STRING':''}
         if '?' in path:  #处理请求中的参数
             path,querystring=path.split('?')
             request_env['QUERY_STRING']=querystring
@@ -668,11 +705,11 @@ async def client_dispatch(reader, writer):
         request_env['SERVER_NAME']=SERVER
         request_env['SERVER_PORT']=SERVER_PORT
     
-        #判断是否是http请求
+        #判断HTTP和WEBSOCKET请求
         if protocal.startswith('HTTP'):
-            if method=='GET':
+            if method=='GET':       #只支持GET请求
                 request_env['wsgi.url_scheme']='https' if 'https' in protocal.lower() else 'http'
-                request_headers={}
+                request_headers={}  #保存http请求头中的信息
                 #解析http请求头
                 while True:
                     data=await reader.readline()
@@ -683,31 +720,30 @@ async def client_dispatch(reader, writer):
                     request_headers[k]=v.strip()
                 request_env['request_headers']=request_headers
                 #判断链接是http或websocket
-                if 'Sec-WebSocket-Key' in request_headers: #websocket连接
+                if 'Sec-WebSocket-Key' in request_headers:  #表示是WebSocket连接
                     print('websocket connection')
-                    websockethd=WebsocketHandler(reader,writer,websocketapp)
-                    await websockethd.run(request_env)
+                    websockethandler=WebsocketHandler(reader,writer,websocketapp)
+                    await websockethandler.run(request_env)
                 else: #http连接
-                    hd=HttpHandler(reader,writer,httpapp)
-                    await hd.run(request_env)
+                    httphandler=HttpHandler(reader,writer,httpapp)
+                    await httphandler.run(request_env)
             else:
-                writer.write(HTTP_UNSUPPORTED_RSP.format(protocal).encode())
+                writer.write(HTTP_UNSUPPORTED_RSP.format(method).encode())
                 await writer.drain()
-                raise Exception('Unsupported HTTP method')
+                raise Exception('Unsupported HTTP method, error[1]')
         elif "MTAS-SOCKET" in protocal:
             print('MTAS-SOCKET connection')
             request_env['wsgi.url_scheme']='mtassocket'
-            mtassockethd=MtassocketHandler(reader,writer,mtassocketapp)
-            await mtassockethd.run(request_env) 
+            mtassockethandler=MtassocketHandler(reader,writer,mtassocketapp)
+            await mtassockethandler.run(request_env) 
         else:
-            raise Exception('not a valid request')     
+            raise Exception("Unsupported protocol error[2]")  
     
     except Exception as e:
-        print('error happenned when handling request',e)
+        print('error happenned when handling request:',e)
         await asyncio.sleep(1) #保证发送数据完成才关闭，兼容性
         writer.close()
         #await writer.wait_closed() 
-        return
     
     
 ######################################################################
@@ -729,8 +765,8 @@ def setapp(htapp=None,wsapp=None,scapp=None):
         mtassocketapp=scapp
     
 #####################################################################
-#在python的version >= 3.7中使用main1
-async def main1(addr='0.0.0.0',port=8888,isssl=False):
+#在python的version >= 3.7中使用main
+async def main(addr='0.0.0.0',port=8888,isssl=False):
     if isssl:
         sslcontext = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         sslcontext.load_cert_chain('./cert.pem', './cert.key')
@@ -756,11 +792,12 @@ def run(addr='0.0.0.0',port=8888,httpapp=None,websocketapp=None,socketapp=None,i
     setapp(httpapp,websocketapp,socketapp)
     print('server starting at {}:{}\n'.format(addr,port))
     py_ver=sys.version.split('.') 
-    if py_ver[0] !='3' :raise Exception('only support python3.6 or higher')
+    if py_ver[0] !='3' :
+        raise Exception('only support python3.6 or higher')
     ver=int(py_ver[1])
     #print(ver)
     if ver>=7:
-        coro=main1(addr,port,isssl)
+        coro=main(addr,port,isssl)
         LOOP.create_task(coro)
         LOOP.run_forever()
     else:
@@ -771,9 +808,9 @@ def run(addr='0.0.0.0',port=8888,httpapp=None,websocketapp=None,socketapp=None,i
         
 #####################################################################
 #测试MTAS的app   
-#httpapp 符合Python wsgi 规范
+#httpapp 符合Python WSGI 规范
 def demohttpapp():  
-    #提供了一个最简单的wsgi http响应和websocket响应的例子     
+    #提供了一个最简单的WSGI HTTP响应和websocket响应的例子     
     def httpapp(environ, start_response):
         #a test wsgi http app
         #print(environ)
@@ -782,13 +819,13 @@ def demohttpapp():
         response_headers = [('Content-Type', 'text/html')]
         start_response(status, response_headers)
         path = environ['PATH_INFO'][1:] or 'This is a Demo Index Page!<br>The MTAS Server is running!'
-        return [b'<h1> %s </h1>' % path.encode()]    
+        return [f'<h1>{path}</h1>'.encode()]    
     return httpapp
 
 async def demopublisher(env,data=None):   #接受env，data，返回数据，类型
     #simulate image publisher
     await asyncio.sleep(1)
-    return b'abcdefg','text'
+    return b'MTAS publisher','text'
 
 async def demosubscriber(env,data=None):   #接受env，data，返回数据，类型
     print(data)
@@ -810,6 +847,11 @@ async def democlient(env,data=None):
     #处理响应
     reqdata=env['reqdata']
     print(f'response from server: {reqdata}={data}')
+
+async def demorawpub(env):
+    #asdf
+    return b'hello world', 'text'
+
 
 if __name__=='__main__':
     print('starting a demo server')
@@ -837,6 +879,8 @@ if __name__=='__main__':
     scapp.addfunc('/subscriber','subscriber',demosubscriber)
     scapp.addfunc('/server','server',demoserver)
     scapp.addfunc('/client','client',democlient)
+    scapp.addfunc('/rawpub', 'rawpub', demorawpub)
 
-
-    run(addr,port,httpapp=demohttpapp(),websocketapp=wsapp,socketapp=scapp)
+    servedir('/', './')
+    run(addr,port,httpapp=None,websocketapp=wsapp,socketapp=scapp)
+    #run(addr,port,httpapp=demohttpapp(),websocketapp=wsapp,socketapp=scapp)
