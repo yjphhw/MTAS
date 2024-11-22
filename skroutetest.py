@@ -3,6 +3,25 @@
 import socket
 import threading
 
+class Rawpubsk(threading.Thread):
+    #用于中继，透传数据
+    def __init__(self,ip,port):
+        super().__init__(daemon=True)
+        self.ip=ip
+        self.port=port 
+        self.start()
+    def run(self):
+        # 创建 socket 对象
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect((self.ip, self.port))
+        # 发送消息给服务器
+        message_to_send = "rawpub /rawpub MTAS-SOCKET1.0\r\n"  #握手帧:method url MTAS-SOCKET1.0\r\n+数据帧：#99999999data:payload
+        client_socket.send(message_to_send.encode())
+        while True:
+            rawmsg=client_socket.recv(10)
+            print(rawmsg)
+            
+
 class PubSk(threading.Thread):
     def __init__(self,ip,port):
         super().__init__(daemon=True)
@@ -125,5 +144,6 @@ if __name__=='__main__':
     SubSk(ip,port)
     ServerSk(ip,port)
     ClientSk(ip,port)
+    Rawpubsk(ip,port)
     while True:
         time.sleep(1)
